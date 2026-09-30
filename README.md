@@ -14,16 +14,17 @@
 - **数据密钥封装**：首次创建时生成随机数据密钥，用口令派生的 KEK 经 `wrapKey` 封装后，与 KDF 盐/迭代次数一起存入 IndexedDB 的 `meta` 表。
 - **逐条加密**：每条便笺使用全新的随机 IV 做 AES-GCM 加密，GCM 认证标签同时保证机密性与完整性——密文或 IV 被篡改时解密必然失败。
 - **明文与口令不持久化**：IndexedDB 里只有密文、IV、修订号、时间戳和封装后的密钥；明文与口令只存在于内存/DOM，锁定即销毁。
-- **改口令 = 重新封装**：修改口令时用新盐派生新 KEK，对同一个数据密钥重新封装，单次原子 `put` 写回；**便笺密文一个字节都不动**。写入中途失败（掉电/配额/异常）时事务回滚，旧封装保持原样，旧口令依然有效。
+- **改口令 = 重新封装 + CAS**：修改口令时用新盐派生新 KEK，对同一个数据密钥重新封装；`keyVersion` 的读取、比较与写入在同一个 IndexedDB 事务内完成。两个标签页并发改口令时只有一方可提交，另一方收到冲突并立即注销旧会话；成功方广播 `passphrase-changed`，其它标签页立即回到锁定页。便笺密文一个字节都不动。写入中途失败（掉电/配额/异常）时事务回滚，旧封装保持原样，旧口令依然有效。
 - **失败不改旧数据**：错误口令、存储失败（如配额耗尽）都不会改动任何已存记录——所有「检查 + 写入」都在单个 IndexedDB 事务内完成，失败即整体回滚。
+- **异步会话栅栏**：每次解锁、初始化和便笺读写都绑定会话代次与 `AbortController`。解锁尚未完成时锁定，旧异步结果不能重新进入主界面；本标签页锁定会中止尚未提交的 IndexedDB 事务，防止旧 UI 回调在锁定后继续写入。
 - **跨标签页乐观锁**：每条记录带 `revision` 修订号，保存在事务内比对「读取时的修订号」，不一致即中止提交，后写的一方收到冲突提示并被要求**重新载入**，先写的内容不会被覆盖（IndexedDB 事务在同一 origin 内串行，两个标签页同样成立）。
-- **锁定即撤明文**：点「锁定」或任一标签页锁定时，通过 `BroadcastChannel` 广播，所有标签页立即销毁内存中的数据密钥、明文缓存与 DOM 中的明文，回到解锁页。
+- **锁定即撤明文**：点「锁定」或任一标签页锁定时，通过 `BroadcastChannel` 广播，所有标签页立即销毁内存中的数据密钥、明文缓存、DOM 中的明文和进行中的操作，回到解锁页。
 
 ## 数据布局（IndexedDB：`secure-notes-workbench`）
 
 | Object Store | 内容 |
 | --- | --- |
-| `meta` | `wrappedDataKey`：PBKDF2 盐与迭代次数、封装 IV、封装后的数据密钥 |
+| `meta` | `wrappedDataKey`：`keyVersion`、PBKDF2 盐与迭代次数、封装 IV、封装后的数据密钥 |
 | `notes` | `{ id, iv, ciphertext, revision, updatedAt }`，上限 100 条 |
 
 ## 运行
@@ -54,6 +55,7 @@ npm run build                   # 产出 dist/
 | 改口令：密文逐字节不变；写入中断 → 旧口令仍有效 | `tests/passphrase.test.ts` |
 | 100 条容量上限；存储失败回滚、旧数据不变 | `tests/capacity.test.ts` |
 | 跨标签页修订号冲突：后写被拦、提示重新载入 | `tests/conflict.test.ts` |
+| 解锁/保存与锁定竞争、并发改口令 CAS、落败标签页注销 | `tests/race.test.ts` |
 
 ```bash
 npm test            # 仅测试
@@ -77,8 +79,8 @@ src/
   crypto.ts    WebCrypto 原语：PBKDF2 派生、密钥封装/解封、AES-GCM 加解密
   db.ts        IndexedDB 访问层：单事务「检查+写入」，失败整体回滚
   store.ts     业务层：加解密 + 100 条上限 + 修订号乐观锁
-  session.ts   会话：解锁/锁定/改口令，锁定广播，内存密钥销毁
-  lockbus.ts   BroadcastChannel 锁定广播（含测试用进程内实现）
+  session.ts   会话：解锁/锁定/改口令、会话代次/AbortController、状态广播
+  lockbus.ts   BroadcastChannel 锁定与口令更换广播（含测试用进程内实现）
   ui.ts        纯 DOM 界面：锁定页 / 列表 / 编辑器 / 冲突与篡改提示
   main.ts      入口
 tests/         Vitest 测试（fake-indexeddb）

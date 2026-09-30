@@ -29,6 +29,8 @@ function titleOf(plaintext: string): string {
 export class WorkbenchUI {
   private currentId: string | null = null;
   private currentRevision = 0;
+  /** 每次整体渲染递增；锁定后旧异步渲染一律丢弃 */
+  private renderGeneration = 0;
   /** 列表标题缓存（明文派生物，仅内存，锁定即清） */
   private titles = new Map<string, string>();
 
@@ -42,16 +44,19 @@ export class WorkbenchUI {
       this.currentId = null;
       this.currentRevision = 0;
       this.titles.clear();
-      void this.renderLocked();
+      const generation = ++this.renderGeneration;
+      void this.renderLocked(generation);
     };
-    await this.renderLocked();
+    await this.renderLocked(++this.renderGeneration);
   }
 
   // ---------- 锁定页 ----------
 
-  private async renderLocked(): Promise<void> {
+  private async renderLocked(expectedGeneration = ++this.renderGeneration): Promise<void> {
+    if (expectedGeneration !== this.renderGeneration) return;
     this.root.replaceChildren();
     const initialized = await this.session.isInitialized();
+    if (expectedGeneration !== this.renderGeneration) return;
     const message = h('p', { class: 'msg', role: 'alert' });
 
     const showError = (err: unknown) => {
@@ -74,9 +79,11 @@ export class WorkbenchUI {
             try {
               await this.session.unlock(input.value);
               input.value = '';
+              if (expectedGeneration !== this.renderGeneration || !this.session.unlocked) return;
               await this.renderMain();
             } catch (err) {
               input.value = '';
+              if (expectedGeneration !== this.renderGeneration) return;
               input.focus();
               showError(err instanceof AuthError ? '口令错误，请重试' : err);
             }
@@ -116,8 +123,10 @@ export class WorkbenchUI {
               await this.session.initialize(pass.value);
               pass.value = '';
               confirm.value = '';
+              if (expectedGeneration !== this.renderGeneration || !this.session.unlocked) return;
               await this.renderMain();
             } catch (err) {
+              if (expectedGeneration !== this.renderGeneration) return;
               showError(err);
             }
           },
@@ -136,6 +145,7 @@ export class WorkbenchUI {
   // ---------- 主界面 ----------
 
   private async renderMain(): Promise<void> {
+    const generation = ++this.renderGeneration;
     this.root.replaceChildren();
     this.currentId = null;
 
@@ -152,6 +162,7 @@ export class WorkbenchUI {
     const newBtn = h('button', { type: 'button' }, '新建便笺') as HTMLButtonElement;
 
     const store = this.session.noteStore;
+    const isStale = () => generation !== this.renderGeneration || !this.session.unlocked;
 
     const setBanner = (text: string, onReload?: () => void) => {
       banner.replaceChildren();
@@ -170,6 +181,7 @@ export class WorkbenchUI {
 
     const refreshList = async () => {
       const metas = await store.list();
+      if (isStale()) return;
       countEl.textContent = `${metas.length} / ${MAX_NOTES}`;
       newBtn.disabled = metas.length >= MAX_NOTES;
       listEl.replaceChildren();
@@ -177,8 +189,10 @@ export class WorkbenchUI {
         if (!this.titles.has(meta.id)) {
           try {
             const { plaintext } = await store.read(meta.id);
+            if (isStale()) return;
             this.titles.set(meta.id, titleOf(plaintext));
           } catch (err) {
+            if (isStale()) return;
             this.titles.set(
               meta.id,
               err instanceof IntegrityError ? '⚠ 密文损坏，无法解密' : '⚠ 读取失败',
@@ -202,6 +216,7 @@ export class WorkbenchUI {
       setBanner('');
       try {
         const { plaintext, revision } = await store.read(id);
+        if (isStale()) return;
         this.currentId = id;
         this.currentRevision = revision;
         textarea.value = plaintext;
@@ -210,6 +225,7 @@ export class WorkbenchUI {
         deleteBtn.disabled = false;
         textarea.focus();
       } catch (err) {
+        if (isStale()) return;
         this.currentId = null;
         textarea.value = '';
         textarea.disabled = true;
@@ -228,9 +244,11 @@ export class WorkbenchUI {
       try {
         const id = globalThis.crypto.randomUUID();
         await store.create(id, '');
+        if (isStale()) return;
         this.titles.set(id, titleOf(''));
         await openNote(id);
       } catch (err) {
+        if (isStale()) return;
         editorStatus.textContent =
           err instanceof CapacityError
             ? err.message
@@ -245,13 +263,17 @@ export class WorkbenchUI {
       const id = this.currentId;
       try {
         const meta = await store.update(id, textarea.value, this.currentRevision);
+        if (isStale()) return;
         this.currentRevision = meta.revision;
         this.titles.set(id, titleOf(textarea.value));
         editorStatus.textContent = '已保存';
         await refreshList();
       } catch (err) {
+        if (isStale()) return;
         if (err instanceof ConflictError) {
           setBanner('该便笺已在其它标签页被修改，当前内容未保存。', () => void openNote(id));
+        } else if (err instanceof AuthError) {
+          editorStatus.textContent = '工作台已锁定';
         } else {
           editorStatus.textContent = `保存失败：${err instanceof Error ? err.message : String(err)}`;
         }
@@ -263,6 +285,7 @@ export class WorkbenchUI {
       const id = this.currentId;
       try {
         await store.remove(id);
+        if (isStale()) return;
         this.titles.delete(id);
         this.currentId = null;
         textarea.value = '';
@@ -271,6 +294,7 @@ export class WorkbenchUI {
         deleteBtn.disabled = true;
         await refreshList();
       } catch (err) {
+        if (isStale()) return;
         editorStatus.textContent = `删除失败：${err instanceof Error ? err.message : String(err)}`;
       }
     });
@@ -280,6 +304,7 @@ export class WorkbenchUI {
     const pwCurrent = h('input', { type: 'password', placeholder: '当前口令' }) as HTMLInputElement;
     const pwNext = h('input', { type: 'password', placeholder: '新口令（至少 8 位）' }) as HTMLInputElement;
     const pwConfirm = h('input', { type: 'password', placeholder: '确认新口令' }) as HTMLInputElement;
+    const pwSubmitBtn = h('button', { type: 'submit' }, '确认修改') as HTMLButtonElement;
     const pwPanel = h(
       'form',
       {
@@ -296,21 +321,26 @@ export class WorkbenchUI {
             pwMessage.textContent = '两次输入的新口令不一致';
             return;
           }
-          try {
-            await this.session.changePassphrase(pwCurrent.value, pwNext.value);
-            pwMessage.textContent = '口令已更新（便笺密文未改动）';
-          } catch (err) {
-            pwMessage.textContent = err instanceof Error ? err.message : String(err);
-          }
+          const current = pwCurrent.value;
+          const next = pwNext.value;
           pwCurrent.value = '';
           pwNext.value = '';
           pwConfirm.value = '';
+          pwSubmitBtn.disabled = true;
+          try {
+            await this.session.changePassphrase(current, next);
+            if (!isStale()) pwMessage.textContent = '口令已更新（便笺密文未改动）';
+          } catch (err) {
+            if (isStale()) return;
+            pwSubmitBtn.disabled = false;
+            pwMessage.textContent = err instanceof Error ? err.message : String(err);
+          }
         },
       },
       pwCurrent,
       pwNext,
       pwConfirm,
-      h('button', { type: 'submit' }, '确认修改'),
+      pwSubmitBtn,
       pwMessage,
     );
 

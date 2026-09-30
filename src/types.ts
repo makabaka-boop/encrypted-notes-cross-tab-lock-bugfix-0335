@@ -17,6 +17,8 @@ export interface KdfParams {
 
 /** 用口令派生密钥（KEK）封装后的数据密钥 */
 export interface WrappedKeyRecord {
+  /** 数据密钥封装版本；每次成功改口令递增，用于跨标签页 CAS */
+  keyVersion?: number;
   kdf: KdfParams;
   wrapIv: Uint8Array;
   wrappedKey: ArrayBuffer;
