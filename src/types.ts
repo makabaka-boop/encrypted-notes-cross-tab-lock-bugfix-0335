@@ -20,6 +20,12 @@ export interface WrappedKeyRecord {
   kdf: KdfParams;
   wrapIv: Uint8Array;
   wrappedKey: ArrayBuffer;
+  /**
+   * 封装记录的修订号，首次初始化为 1，每次改口令 +1。
+   * 跨标签页改口令时做乐观锁：事务内比对，不一致即中止，
+   * 避免两个标签页的盲写互相静默覆盖。
+   */
+  revision: number;
 }
 
 /** 便笺列表用的元信息（不含明文） */

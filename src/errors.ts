@@ -6,6 +6,17 @@ export class AuthError extends Error {
   }
 }
 
+/**
+ * 异步操作跨越 await 期间会话被锁定：操作结果作废。
+ * 仍是 AuthError（锁定本质就是认证态失效），调用方可据此区别于口令错误。
+ */
+export class LockedError extends AuthError {
+  constructor(message = '工作台已锁定') {
+    super(message);
+    this.name = 'LockedError';
+  }
+}
+
 /** 修订号冲突：其它标签页已先行写入 */
 export class ConflictError extends Error {
   constructor(message = '该便笺已被其它标签页修改，请重新载入') {

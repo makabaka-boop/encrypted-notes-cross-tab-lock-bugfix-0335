@@ -1,4 +1,4 @@
-import { AuthError, CapacityError, ConflictError, IntegrityError } from './errors';
+import { AuthError, CapacityError, ConflictError, IntegrityError, LockedError } from './errors';
 import type { Session } from './session';
 import { MAX_NOTES } from './store';
 
@@ -31,6 +31,8 @@ export class WorkbenchUI {
   private currentRevision = 0;
   /** 列表标题缓存（明文派生物，仅内存，锁定即清） */
   private titles = new Map<string, string>();
+  /** 带到下一个锁定页的提示（如改口令成功），显示后即清 */
+  private lockedNotice = '';
 
   constructor(
     private readonly root: HTMLElement,
@@ -53,6 +55,10 @@ export class WorkbenchUI {
     this.root.replaceChildren();
     const initialized = await this.session.isInitialized();
     const message = h('p', { class: 'msg', role: 'alert' });
+    if (this.lockedNotice !== '') {
+      message.textContent = this.lockedNotice;
+      this.lockedNotice = '';
+    }
 
     const showError = (err: unknown) => {
       message.textContent = err instanceof Error ? err.message : String(err);
@@ -78,7 +84,11 @@ export class WorkbenchUI {
             } catch (err) {
               input.value = '';
               input.focus();
-              showError(err instanceof AuthError ? '口令错误，请重试' : err);
+              if (err instanceof LockedError) {
+                showError('解锁期间工作台已被锁定，请重新输入口令');
+              } else {
+                showError(err instanceof AuthError ? '口令错误，请重试' : err);
+              }
             }
           },
         },
@@ -296,11 +306,18 @@ export class WorkbenchUI {
             pwMessage.textContent = '两次输入的新口令不一致';
             return;
           }
+          // 成功后会话会立即锁定并重渲染锁定页，先把提示放好
+          this.lockedNotice = '口令已更新，请用新口令解锁；其它标签页也已锁定';
           try {
             await this.session.changePassphrase(pwCurrent.value, pwNext.value);
-            pwMessage.textContent = '口令已更新（便笺密文未改动）';
           } catch (err) {
-            pwMessage.textContent = err instanceof Error ? err.message : String(err);
+            this.lockedNotice = '';
+            pwMessage.textContent =
+              err instanceof ConflictError
+                ? '口令已在其它标签页被修改，本次修改未生效，请用当前口令重新解锁后再试'
+                : err instanceof Error
+                  ? err.message
+                  : String(err);
           }
           pwCurrent.value = '';
           pwNext.value = '';

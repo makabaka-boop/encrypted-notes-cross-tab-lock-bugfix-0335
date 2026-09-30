@@ -26,7 +26,8 @@ describe('修改口令', () => {
       expect(record.revision).toBe(prev.revision);
     }
 
-    session.lock();
+    // 改口令后本标签页也立即锁定，需用新口令重新认证
+    expect(session.unlocked).toBe(false);
     await expect(session.unlock('old-passphrase')).rejects.toThrow(AuthError);
     await session.unlock('new-passphrase');
     await expect(session.noteStore.read('n1')).resolves.toMatchObject({ plaintext: '第一条' });
@@ -53,8 +54,10 @@ describe('修改口令', () => {
     await session.initialize('old-passphrase');
     await session.noteStore.create('n1', '关键数据');
 
-    // 让封装密钥的原子写入失败一次，模拟改口令过程被中断
-    vi.spyOn(db, 'putMeta').mockRejectedValueOnce(new Error('simulated storage crash'));
+    // 让封装密钥的原子 CAS 写入失败一次，模拟改口令过程被中断
+    vi.spyOn(db, 'putWrappedKeyIfRevision').mockRejectedValueOnce(
+      new Error('simulated storage crash'),
+    );
 
     await expect(session.changePassphrase('old-passphrase', 'new-passphrase')).rejects.toThrow(
       'simulated storage crash',
